@@ -10,7 +10,7 @@
     "mongodb": "^6.3.0",
     "node-fetch": "^3.3.2",
     "dotenv": "^16.3.1",
-    "discord.js-selfbot-vg18-v13": "^3.7.8"
+    "discord.js-selfbot-v13": "^3.7.1"
   },
 "engines": {
   "node": ">=20.18.0"
