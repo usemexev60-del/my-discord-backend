@@ -1,7 +1,8 @@
-// Discord Activity OAuth Backend - Express Server
+// Discord Self-bot Backend - Express Server
 import express from 'express';
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
+import { Client, RichPresence } from 'discord.js-selfbot-v13';
 import { connectDB, getDB } from './db.js';
 
 dotenv.config();
@@ -9,10 +10,9 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Middleware
 app.use(express.json());
 
-// CORS - allow frontend Activity to access
+// CORS
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', 'Content-Type');
@@ -21,67 +21,150 @@ app.use((req, res, next) => {
   next();
 });
 
-// ===== Core route: exchange code for access_token =====
-app.post('/api/token', async (req, res) => {
-  const { code } = req.body;
+// ===== تخزين الـ Self-bot clients في الذاكرة =====
+const activeClients = new Map();
 
-  if (!code) {
-    return res.status(400).json({ error: 'Missing code parameter' });
+function getClientKey(token) {
+  return token.slice(-10);
+}
+
+// ===== مسار تفعيل حالة Self-bot =====
+app.post('/api/selfbot/status', async (req, res) => {
+  const { token, state, details, statusType } = req.body;
+
+  if (!token) {
+    return res.status(400).json({ error: 'التوكن مطلوب' });
   }
 
+  const clientKey = getClientKey(token);
+
   try {
-    const response = await fetch('https://discord.com/api/oauth2/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id: process.env.DISCORD_CLIENT_ID,
-        client_secret: process.env.DISCORD_CLIENT_SECRET,
-        grant_type: 'authorization_code',
-        code: code,
-      }),
-    });
+    let client = activeClients.get(clientKey);
 
-    const tokenData = await response.json();
+    if (!client || !client.user) {
+      client = new Client({ checkUpdate: false });
 
-    if (!response.ok) {
-      console.error('Token exchange failed:', tokenData);
-      return res.status(response.status).json(tokenData);
+      await client.login(token);
+
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(
+          () => reject(new Error('انتهت المهلة - التوكن غلط أو الحساب محظور')),
+          20000
+        );
+        client.once('ready', () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+        client.once('error', (e) => {
+          clearTimeout(timeout);
+          reject(e);
+        });
+      });
+
+      activeClients.set(clientKey, client);
+      console.log('✅ Self-bot شغال للحساب: ' + client.user.username);
     }
 
-    // Save user token to MongoDB
-    if (tokenData.access_token) {
-      try {
-        const db = getDB();
-        await db.collection('user_tokens').updateOne(
-          { codeUsed: code },
-          {
-            $set: {
-              codeUsed: code,
-              accessToken: tokenData.access_token,
-              refreshToken: tokenData.refresh_token,
-              expiresIn: tokenData.expires_in,
-              scope: tokenData.scope,
-              createdAt: new Date(),
-            },
+    const typeMap = {
+      STREAMING: 'STREAMING',
+      PLAYING: 'PLAYING',
+      LISTENING: 'LISTENING',
+      WATCHING: 'WATCHING',
+    };
+    const type = typeMap[statusType] || 'STREAMING';
+
+    const presence = new RichPresence(client)
+      .setApplicationId('817229550684471297')
+      .setType(type)
+      .setName('Tools Hub')
+      .setDetails(details || 'يبث مباشر')
+      .setState(state || 'على Tools Hub')
+      .setStartTimestamp(Date.now());
+
+    if (type === 'STREAMING') {
+      presence.setURL('https://www.twitch.tv/toolshub');
+    }
+
+    await client.user.setPresence({
+      activities: [presence],
+      status: 'online',
+    });
+
+    try {
+      const db = getDB();
+      await db.collection('selfbot_users').updateOne(
+        { discordId: client.user.id },
+        {
+          $set: {
+            discordId: client.user.id,
+            username: client.user.username,
+            lastState: state,
+            lastDetails: details,
+            lastType: type,
+            updatedAt: new Date(),
           },
-          { upsert: true }
-        );
-        console.log('✅ Token saved to MongoDB');
-      } catch (dbErr) {
-        console.error('DB save failed:', dbErr.message);
-      }
+        },
+        { upsert: true }
+      );
+    } catch (dbErr) {
+      console.warn('DB save failed:', dbErr.message);
     }
 
     res.json({
-      access_token: tokenData.access_token,
-      refresh_token: tokenData.refresh_token,
-      expires_in: tokenData.expires_in,
+      success: true,
+      message: 'تم تفعيل الحالة',
+      user: {
+        id: client.user.id,
+        username: client.user.username,
+      },
     });
 
-  } catch (error) {
-    console.error('Server error:', error);
-    res.status(500).json({ error: 'Token exchange failed' });
+  } catch (err) {
+    console.error('Self-bot error:', err.message);
+    activeClients.delete(clientKey);
+
+    let errorMsg = err.message;
+    if (errorMsg.includes('TOKEN_INVALID')) {
+      errorMsg = 'التوكن غلط أو منتهي الصلاحية';
+    }
+
+    res.status(500).json({ error: errorMsg });
   }
+});
+
+// ===== مسار إيقاف الحالة =====
+app.post('/api/selfbot/stop', async (req, res) => {
+  const { token } = req.body;
+
+  if (!token) {
+    return res.status(400).json({ error: 'التوكن مطلوب' });
+  }
+
+  const clientKey = getClientKey(token);
+  const client = activeClients.get(clientKey);
+
+  if (client) {
+    await client.destroy();
+    activeClients.delete(clientKey);
+    res.json({ success: true, message: 'تم إيقاف الحالة' });
+  } else {
+    res.json({ success: true, message: 'ما كان فيه حالة شغالة' });
+  }
+});
+
+// ===== قائمة الـ bots الشغالة =====
+app.get('/api/selfbot/list', (req, res) => {
+  const list = [];
+  activeClients.forEach((client, key) => {
+    if (client.user) {
+      list.push({
+        key,
+        username: client.user.username,
+        id: client.user.id,
+      });
+    }
+  });
+  res.json({ count: list.length, clients: list });
 });
 
 // ===== Health check =====
@@ -89,7 +172,7 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date() });
 });
 
-// ===== Start server =====
+// ===== Start =====
 async function start() {
   try {
     await connectDB();
@@ -98,7 +181,7 @@ async function start() {
   }
 
   app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+    console.log('🚀 Server running on port ' + PORT);
   });
 }
 
