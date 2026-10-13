@@ -49,7 +49,7 @@ app.post('/api/selfbot/status', async (req, res) => {
       await new Promise((resolve, reject) => {
         const timeout = setTimeout(
           () => reject(new Error('انتهت المهلة - التوكن غلط أو الحساب محظور')),
-          20000
+          60000
         );
         client.once('ready', () => {
           clearTimeout(timeout);
